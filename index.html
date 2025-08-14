@@ -1,0 +1,127 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Websim Host-Validated Auto Counter</title>
+
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+
+  <!-- importmap for websim socket (vanilla usage) -->
+  <script type="importmap">
+    {
+      "imports": {
+        "@websim/websim-socket": "https://esm.websim.com/@websim/websim-socket"
+      }
+    }
+  </script>
+
+  <style>
+    :root{
+      --bg:#0f1724;
+      --card:#0b1220;
+      --muted:#9aa4b2;
+      --accent:#4f46e5;
+      color-scheme: dark;
+    }
+    body{
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+      margin:0;
+      padding:24px;
+      background:linear-gradient(180deg,var(--bg),#071024);
+      color:#e6eef8;
+      min-height:100vh;
+    }
+    .container{
+      max-width:900px;
+      margin:0 auto;
+    }
+    header{
+      display:flex;
+      align-items:center;
+      gap:16px;
+      margin-bottom:18px;
+    }
+    h1{margin:0;font-size:20px}
+    .card{
+      background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));
+      border:1px solid rgba(255,255,255,0.03);
+      padding:16px;
+      border-radius:12px;
+      box-shadow: 0 6px 18px rgba(2,6,23,0.6);
+    }
+    .row{display:flex;gap:12px;align-items:center}
+    .muted{color:var(--muted);font-size:13px}
+    .leaderboard{margin-top:16px}
+    .entry{display:flex;align-items:center;gap:12px;padding:10px;border-radius:8px}
+    .entry:nth-child(odd){background:rgba(255,255,255,0.01)}
+    .avatar{
+      width:40px;height:40px;border-radius:8px;background:#0b1220;flex:0 0 40px;overflow:hidden;
+      display:flex;align-items:center;justify-content:center;border:1px solid rgba(255,255,255,0.03)
+    }
+    .avatar img{width:100%;height:100%;object-fit:cover}
+    .username{font-weight:600}
+    .score{margin-left:auto;font-weight:700;font-size:18px;color:var(--accent)}
+    .indicator{display:inline-block;width:10px;height:10px;border-radius:999px;margin-left:8px}
+    .host-ind{background:#10b981}
+    .not-host{background:#374151}
+    .controls{margin-top:12px;display:flex;gap:8px;flex-wrap:wrap}
+    button{
+      background:transparent;border:1px solid rgba(255,255,255,0.06);padding:8px 12px;border-radius:8px;color:inherit;
+      cursor:pointer;
+    }
+    button.primary{
+      background:linear-gradient(90deg,var(--accent),#06b6d4);
+      border:0;color:#041226;font-weight:700;
+    }
+    footer{margin-top:18px;color:var(--muted);font-size:13px}
+    .small{font-size:13px;color:var(--muted)}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div>
+        <h1>Host-Validated Auto Counter</h1>
+        <div class="muted">Host must be connected for counting to run. Host validates and increments everyone's score once per second.</div>
+      </div>
+    </header>
+
+    <section id="app" class="card">
+      <div id="status" class="row">
+        <div><strong>Client:</strong> <span id="client-name">—</span> <span id="host-dot" class="indicator not-host" title="Host status"></span></div>
+        <div class="small" style="margin-left:12px">Creator (host): <span id="creator-username">—</span></div>
+      </div>
+
+      <div class="controls">
+        <button id="refresh-peers">Refresh Peers</button>
+        <button id="reset-leaderboard">Reset Leaderboard (host only)</button>
+        <button id="toggle-auto" class="primary">Toggle Host Auto Counting</button>
+      </div>
+
+      <div style="margin-top:12px" class="small">
+        Counting behavior:
+        <ul>
+          <li>When the project creator (host) is connected and host-auto is enabled, the host will increment each connected user's leaderboard score by +1 per second.</li>
+          <li>If host disconnects, counting stops immediately.</li>
+          <li>Scores are stored in the persistent collection "leaderboard" (one row per user, id = user_id).</li>
+        </ul>
+      </div>
+
+      <div id="leaderboard" class="leaderboard">
+        <h3 style="margin-top:14px;margin-bottom:8px">Leaderboard</h3>
+        <div id="rows" role="list" aria-live="polite">
+          <!-- rows inserted here -->
+        </div>
+      </div>
+
+      <footer>
+        <div id="info" class="small">Initializing...</div>
+      </footer>
+    </section>
+  </div>
+
+  <script type="module" src="app.js"></script>
+<script defer src="https://static.cloudflareinsights.com/beacon.min.js/v8c78df7c7c0f484497ecbca7046644da1771523124516" integrity="sha512-8DS7rgIrAmghBFwoOTujcf6D9rXvH8xm8JQ1Ja01h9QX8EzXldiszufYa4IFfKdLUKTTrnSFXLDkUEOTrZQ8Qg==" data-cf-beacon='{"version":"2024.11.0","token":"4c6229722a6346bc8eb5cb0e5eae5d41","server_timing":{"name":{"cfCacheStatus":true,"cfEdge":true,"cfExtPri":true,"cfL4":true,"cfOrigin":true,"cfSpeedBrain":true},"location_startswith":null}}' crossorigin="anonymous"></script>
+</body>
+</html>
+
