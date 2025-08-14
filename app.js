@@ -12,9 +12,11 @@ import { WebsimSocket } from "@websim/websim-socket";
     }
   Behavior:
   - The project creator (host) is the only client that will perform the per-second increment of everyone's score.
-  - Host auto increments every connected peer (including host) by +1 each second while host-auto is enabled.
+  - Host auto increments every connected user's leaderboard score by +1 each second while host-auto is enabled.
   - Anyone can view the leaderboard in realtime (we subscribe to the collection).
   - Host can reset leaderboard (only host can perform reset; button is hidden/inactive for non-hosts).
+  - Important change: Only the host will author (create/upsert) leaderboard rows. When any user connects we
+    request the host (via presence-update request) to ensure there is exactly one row for that user (id = user_id).
 */
 
 const room = new WebsimSocket();
@@ -71,6 +73,49 @@ async function init() {
     // not used heavily here, but kept up to date
   });
 
+  // Listen for presence-update requests (used to let clients ask the host to create/upsert their row)
+  // Only meaningful when this client is the creator (host). The callback receives (updateRequest, fromClientId)
+  room.subscribePresenceUpdateRequests(async (updateRequest, fromClientId) => {
+    try {
+      if (!isHostClient) return; // only host should respond to these
+      if (!updateRequest || updateRequest.type !== "ensure_row") return;
+
+      const userId = updateRequest.user_id;
+      const username = updateRequest.username || null;
+
+      if (!userId) return;
+
+      const lb = room.collection("leaderboard");
+
+      // Try to find existing record for this user id
+      // Use filter fallback - some implementations expect id in primary column; filter works as equality query.
+      let existing = [];
+      try {
+        existing = await lb.filter({ id: userId }).getList();
+      } catch (err) {
+        // fallback to full list and find (less optimal)
+        const all = await lb.getList();
+        existing = all.filter(r => (r.id === userId));
+      }
+
+      if (existing && existing.length > 0) {
+        // There's already a row for this user. Ensure it has username if missing, but DO NOT overwrite score.
+        const rec = existing[0];
+        if ((!rec.username || rec.username === "") && username) {
+          await lb.upsert({ id: userId, score: rec.score || 0, username, updated_at: new Date().toISOString() });
+        }
+      } else {
+        // No existing row: create one with score 0 authored by host
+        await lb.upsert({ id: userId, score: 0, username, updated_at: new Date().toISOString() });
+      }
+
+      // Optionally send an ephemeral event back to requester so they can refresh state (requester will get realtime update anyway)
+      room.send({ type: "ensure_row_ack", echo: false, toClientId: fromClientId, user_id: userId });
+    } catch (err) {
+      console.error("Error handling ensure_row request:", err);
+    }
+  });
+
   // Hook up UI actions
   els.refreshPeersBtn.addEventListener("click", refreshPeersList);
   els.resetLeaderboardBtn.addEventListener("click", resetLeaderboard);
@@ -82,6 +127,12 @@ async function init() {
   // initial load
   const initial = await lbCollection.getList();
   renderLeaderboard(initial);
+
+  // On page load, ensure there is exactly one row for this user.
+  // We MUST NOT create the row locally; only the host should author rows.
+  // So: if the creator (host) is connected, send a presence-update request to the host asking them to ensure the row exists.
+  // If creator not connected, inform user that their row will be created when host connects.
+  ensureMyRowExists();
 
   // monitor host state and start/stop host counting accordingly
   startHostWatch();
@@ -108,7 +159,7 @@ function updateClientLabel() {
     els.hostDot.title = "You are the creator (host)";
   } else {
     // also color green if the host is currently connected (creator present among peers)
-    const creatorConnected = creator && Object.values(room.peers || {}).some(p => p.username === creator.username);
+    const creatorConnected = creator && Object.values(room.peers || {}).some(p => p.username === creator.username || p.id === creator.id);
     els.hostDot.classList.remove("host-ind");
     els.hostDot.classList.add("not-host");
     els.hostDot.title = creatorConnected ? "Host is connected" : "Host is not connected";
@@ -123,22 +174,35 @@ function updateClientLabel() {
 function renderLeaderboard(records = []) {
   // records might be an object depending on library; we assume it's an array.
   const rows = Array.isArray(records) ? records.slice() : [];
+  // dedupe by id to be safe (only 1 row per user desired)
+  const uniqueMap = new Map();
+  for (const r of rows) {
+    const userId = r.id || r.user_id || r.userId;
+    if (!userId) continue;
+    // prefer higher score if duplicates exist
+    const existing = uniqueMap.get(userId);
+    if (!existing || (r.score || 0) > (existing.score || 0)) {
+      uniqueMap.set(userId, r);
+    }
+  }
+  const uniqRows = Array.from(uniqueMap.values());
+
   // sort descending by score
-  rows.sort((a, b) => (b.score || 0) - (a.score || 0));
+  uniqRows.sort((a, b) => (b.score || 0) - (a.score || 0));
 
   // clear and render
   els.rows.innerHTML = "";
-  if (rows.length === 0) {
+  if (uniqRows.length === 0) {
     els.rows.innerHTML = `<div class="muted">No scores yet.</div>`;
     return;
   }
 
-  for (const r of rows) {
+  for (const r of uniqRows) {
     const userId = r.id || r.user_id || r.userId;
     const score = r.score || 0;
     // look up username via peers / user collection if available
     // We can show avatar by username when present: https://images.websim.com/avatar/${username}
-    let username = r.username || (room.peers && Object.values(room.peers).find(p => p.id === userId)?.username) || r.user?.username || `user-${userId.slice(0,6)}`;
+    let username = r.username || (room.peers && Object.values(room.peers).find(p => p.id === userId)?.username) || r.user?.username || `user-${(userId || "").toString().slice(0,6)}`;
     const avatarUrl = username ? `https://images.websim.com/avatar/${username}` : null;
 
     const div = document.createElement("div");
@@ -219,17 +283,16 @@ async function hostTick() {
   }
 
   // For each connected peer, upsert (id = user_id) increment score by 1
-  // We will include peer info lookup for username where possible (not required but helpful)
   const now = new Date().toISOString();
   const upserts = [];
   for (const [clientId, p] of Object.entries(peersList)) {
-    // We want to map client -> user id. room.peers entry includes id (clientId) and username; docs say user id available via window.websim.getCurrentUser() but peers entry has user info.
-    // The database spec wants id to be the user's id (user_id). We will attempt to resolve user_id from p.id or from presence mapping.
-    // Best-effort: if presence has user_id for clientId (room.presence may include studio user id), use it; otherwise use p.id (client id) as fallback.
+    // Try to resolve actual user id for the peer:
     const clientPresence = room.presence?.[clientId] || {};
+    // presence may contain user_id per docs; fallbacks to p.id or clientId
     const userId = clientPresence.user_id || p.user_id || p.id || clientId;
     const username = p.username || clientPresence.username || null;
 
+    // ensure we only do one row per user_id (map keys are user_ids)
     const prev = map.get(userId);
     const prevScore = prev ? (prev.score || 0) : 0;
     const newScore = prevScore + 1;
@@ -239,8 +302,8 @@ async function hostTick() {
       score: newScore,
       updated_at: now
     };
-    // store username minimally to help display (though tips advise to store user_id not username; we only store username optionally)
-    if (!prev && username) obj.username = username;
+    // include username if available (host authored), OK to add
+    if (username) obj.username = username;
 
     upserts.push(lb.upsert(obj));
   }
@@ -276,7 +339,6 @@ function startHostWatch() {
   // For simplicity we poll room.peers every 1500ms as well to catch changes.
   setInterval(() => {
     // update cached creator value if possible
-    // Some projects might not expose creator via window.websim.getCreator(); try to fetch from window.websim as well.
     (async () => {
       try {
         if (!creator) {
@@ -343,9 +405,48 @@ async function resetLeaderboard() {
   }
 }
 
+// Request host to ensure a single leaderboard row exists for this user on page load.
+// This avoids non-host clients creating rows; host authors them instead.
+async function ensureMyRowExists() {
+  try {
+    // If currentUser is the creator (host) then we can create our own row locally (we are the author)
+    if (isHostClient) {
+      // Host ensures their own row exists
+      const lb = room.collection("leaderboard");
+      const existing = await lb.filter({ id: currentUser.id }).getList().catch(async () => {
+        const all = await lb.getList();
+        return all.filter(r => r.id === currentUser.id);
+      });
+      if (!existing || existing.length === 0) {
+        await lb.upsert({ id: currentUser.id, score: 0, username: currentUser.username, updated_at: new Date().toISOString() });
+      }
+      return;
+    }
+
+    // If not host: find creator's client id (the connected peer entry for the creator)
+    const peersList = room.peers || {};
+    const creatorEntry = Object.entries(peersList).find(([clientId, p]) => p.username === creator?.username || p.id === creator?.id);
+    if (creatorEntry) {
+      const creatorClientId = creatorEntry[0];
+      // Send a presence-update request to the creator asking them to ensure our row exists.
+      room.requestPresenceUpdate(creatorClientId, {
+        type: "ensure_row",
+        user_id: currentUser.id,
+        username: currentUser.username
+      });
+      // Inform user: the host will create the row and the realtime subscription will update the UI when that happens.
+      els.info.textContent = "Requested host to ensure your leaderboard row exists.";
+    } else {
+      // Creator not connected. Inform the user; their row will be created when host connects.
+      els.info.textContent = "Host not connected. Your leaderboard row will be created when the host connects.";
+    }
+  } catch (err) {
+    console.error("Error requesting host to ensure row:", err);
+  }
+}
+
 // initialize app
 init().catch(err => {
   console.error("Failed to initialize:", err);
   document.getElementById("info").textContent = "Initialization error (see console).";
 });
-
