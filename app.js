@@ -67,11 +67,34 @@ async function init() {
     peers = room.peers || {};
     updateClientLabel();
     refreshPeersList();
+
+    // Ensure our row exists when presence changes (handles reconnects)
+    // Non-host clients will request the host to ensure their row.
+    // Host client will ensure its own row directly.
+    ensureMyRowExists().catch(err => console.error("ensureMyRowExists error:", err));
   });
 
   room.subscribeRoomState((rs) => {
     // not used heavily here, but kept up to date
   });
+
+  // Handle connection / disconnection messages from the low-level event stream.
+  // This helps detect reconnects more reliably and trigger a fresh fetch of the leaderboard.
+  room.onmessage = (event) => {
+    const data = event.data || event;
+    // built-in events: connected, disconnected
+    if (data.type === "connected") {
+      // Our client (or others) connected. Refresh local state & ensure row.
+      // Fetch latest leaderboard snapshot and re-render to ensure continuity after reconnect.
+      refreshLeaderboardSnapshot().catch(err => console.error("refreshLeaderboardSnapshot error:", err));
+      // ensure our row exists (in case we just reconnected)
+      ensureMyRowExists().catch(err => console.error("ensureMyRowExists error on init:", err));
+    } else if (data.type === "disconnected") {
+      // someone disconnected; update UI
+      refreshPeersList();
+    }
+    // allow other custom events to exist
+  };
 
   // Listen for presence-update requests (used to let clients ask the host to create/upsert their row)
   // Only meaningful when this client is the creator (host). The callback receives (updateRequest, fromClientId)
@@ -132,7 +155,7 @@ async function init() {
   // We MUST NOT create the row locally; only the host should author rows.
   // So: if the creator (host) is connected, send a presence-update request to the host asking them to ensure the row exists.
   // If creator not connected, inform user that their row will be created when host connects.
-  ensureMyRowExists();
+  ensureMyRowExists().catch(err => console.error("ensureMyRowExists error on init:", err));
 
   // monitor host state and start/stop host counting accordingly
   startHostWatch();
@@ -409,14 +432,27 @@ async function resetLeaderboard() {
 // This avoids non-host clients creating rows; host authors them instead.
 async function ensureMyRowExists() {
   try {
+    // refresh creator if missing
+    if (!creator) {
+      try {
+        const c = await window.websim.getCreator();
+        if (c) creator = c;
+      } catch (e) {
+        // ignore
+      }
+    }
+
     // If currentUser is the creator (host) then we can create our own row locally (we are the author)
     if (isHostClient) {
       // Host ensures their own row exists
       const lb = room.collection("leaderboard");
-      const existing = await lb.filter({ id: currentUser.id }).getList().catch(async () => {
+      let existing = [];
+      try {
+        existing = await lb.filter({ id: currentUser.id }).getList();
+      } catch (err) {
         const all = await lb.getList();
-        return all.filter(r => r.id === currentUser.id);
-      });
+        existing = all.filter(r => r.id === currentUser.id);
+      }
       if (!existing || existing.length === 0) {
         await lb.upsert({ id: currentUser.id, score: 0, username: currentUser.username, updated_at: new Date().toISOString() });
       }
@@ -442,6 +478,19 @@ async function ensureMyRowExists() {
     }
   } catch (err) {
     console.error("Error requesting host to ensure row:", err);
+  }
+}
+
+// Fetch fresh leaderboard snapshot and render (used on reconnect to ensure we continue from latest scores)
+async function refreshLeaderboardSnapshot() {
+  try {
+    const lb = room.collection("leaderboard");
+    const snapshot = await lb.getList();
+    // render the exact snapshot immediately to avoid any stale UI while subscription catches up
+    renderLeaderboard(snapshot);
+    els.info.textContent = "Leaderboard snapshot refreshed.";
+  } catch (err) {
+    console.error("Error refreshing leaderboard snapshot:", err);
   }
 }
 
